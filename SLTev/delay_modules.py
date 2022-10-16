@@ -1,12 +1,14 @@
 #!/usr/bin/env python
 
+from collections import defaultdict
+
 from files_modules import delay_segmenter
 
 
 def get_timestamps_table_without_partials(ostt_sentences, reference):
     """
     Receiving OStt (time-stamped transcript) sentences and reference sentences and calculate T table just with using complete sentences:
-    elements of T is a dictionary that key is one word of reference and value is the end time of the word.
+    elements of T is a dictionary that key is one word of reference and value is a list of all occurrence times of the word.
     To calculate the T table, first, the spent time of the Complete segment in the Ostt is calculated and the time is divided per number of equivalent sentence words in the reference.
 
     :param ostt_sentences: a list of OStt sentences (each sentence contains multiple P and one C segments)
@@ -25,36 +27,35 @@ def get_timestamps_table_without_partials(ostt_sentences, reference):
     for sentence in range(len(reference)):
         time_step = start_times[sentence]
         step = sentence_lengths[sentence] / len(reference[sentence][:-1])
-        l = dict()
+        l = defaultdict(list)
         for word in reference[sentence][:-1]:
             time_step = time_step + step
-            l[word] = time_step
+            l[word].append(time_step)
         timestamps_table.append(l)
     return timestamps_table
 
 
 def segment_tokens_times(segment):
     """
-    getting a segment and for each token, the ending time is calculated.
+    getting a segment and for each token, all occurrence times are calculated.
 
     :param segment: a segment (Partial or Complete)
-    :return time_tokens: a dictionary that contains unique tokens as keys and ending time as values
+    :return time_tokens: a list that contains tuples of tokens as and occurrence times
     """
 
-    time_tokens = {}
+    time_tokens = []
     duration = float(segment[1]) - float(segment[0])
     step = duration / len(segment[2:-1])
     count = 1
     for token in segment[2:-1]:
-        if token not in time_tokens.keys():
-            time_tokens[token] = float(segment[0]) + count * step
+        time_tokens.append((token, float(segment[0]) + count * step))
         count += 1
     return time_tokens
 
 
 def make_align_dict(align, ref):
     """
-    making alignment between source and reference by aligning file. 
+    making alignment between source and reference by aligning file.
     in the output, each token of reference would be aligned with the token of the source (OStt)
 
     :param align: an align dictionary
@@ -83,29 +84,34 @@ def get_timestamps_table(ostt_sentences, reference_sentences, aligns=None):
     timestamp_table = []
     for index in range(len(ostt_sentences)):
         sentence = ostt_sentences[index]
-        seen_tokens = {}
+        seen_tokens = []
         ostt_token_times = [0]
+        end_seg = sentence[-1][2:]
         for segment in sentence:
             segment_tokens_time = segment_tokens_times(segment)
-            for token, time in segment_tokens_time.items():
-                if token in sentence[-1][2:-1] and token not in seen_tokens.keys():
-                    seen_tokens[token] = time
-                    ostt_token_times.append(time)
+            for i, (token, time) in enumerate(segment_tokens_time):
+                if i == len(end_seg):
+                    break
+                elif token != end_seg[i]:
+                    seen_tokens = seen_tokens[:i]
+                    ostt_token_times = ostt_token_times[:i+1]
+                    break
+                elif i < len(seen_tokens):
+                    continue
+                seen_tokens.append((token, time))
+                ostt_token_times.append(time)
         ostt_token_times.append(0)
 
         # assign time of OStt words (source) to the reference words
-        ref_T = {}
+        ref_T = defaultdict(list)
         counter = 1
         ostt_tokens = []
         for token in reference_sentences[index][:-1]:
-            if token in ref_T.keys():
-                continue
-            p = float(len(ostt_token_times) - 2) / len(set(reference_sentences[index][:-1])) * counter
-
+            p = float(len(ostt_token_times) - 2) / len(reference_sentences[index][:-1]) * counter
             t = ostt_token_times[int(p)] + (
                 (ostt_token_times[int(p) + 1] - ostt_token_times[int(p)]) * (p - int(p))
             )
-            ref_T[token] = t
+            ref_T[token].append(t)
             counter += 1
             ostt_tokens.append(token)
 
@@ -115,10 +121,10 @@ def get_timestamps_table(ostt_sentences, reference_sentences, aligns=None):
             align_dict = make_align_dict(aligns[index], reference_sentences[index])
             for token in ostt_tokens:
                 try:
-                    ref_T[token] = max([ref_T[token], max_value, seen_tokens[align_dict[token]]])
+                    ref_T[token].append(max([ref_T[token], max_value, seen_tokens[align_dict[token]]]))
                 except:
-                    ref_T[token] = max([ref_T[token], max_value])
-                if max_value < ref_T[token]:
+                    ref_T[token].append(max([ref_T[token], max_value]))
+                if max_value < max(ref_T[token]):
                     max_value = ref_T[token]
         timestamp_table.append(ref_T)
     return timestamp_table
@@ -130,8 +136,8 @@ def get_candidate_timestamp_table(sentence_segments):
     candiate timestamps table is a dictionary that keys are words of MT/SLT/ASR sentence, and value is the display time of the words.
 
     :param sentence_segments: a sentence of candidates (SLT/ASR/MT)
-    :return uniq_tokens_show_time: a dictionary that unique tokens are the keys and display times are the values
-    :return uniq_tokens_estimate_time: a dictionary that unique tokens are the keys and estimated times are the values
+    :return tokens_show_time: a list with tuples of tokens and their display times
+    :return tokens_estimate_time: a list with tuples tokens and their estimated times
     """
 
     uniq_tokens_show_time = {}
@@ -148,7 +154,27 @@ def get_candidate_timestamp_table(sentence_segments):
                 uniq_tokens_estimate_time[token] = float(
                     float(segment[1]) + ((tokens.index(token) + 1) * step)
                 )
-    return uniq_tokens_show_time, uniq_tokens_estimate_time
+
+    tokens_show_time = []
+    tokens_estimate_time = []
+    end_seg = sentence_segments[-1][3:-1]
+    for segment in sentence_segments:
+        tokens = segment[3:-1]
+        step = (float(segment[2]) - float(segment[1])) / len(tokens)
+        for i, token in enumerate(tokens):
+            if i == len(end_seg):
+                break
+            elif token != end_seg[i]:
+                tokens_show_time = tokens_show_time[:i]
+                tokens_estimate_time = tokens_estimate_time[:i]
+                break
+            elif i < len(tokens_show_time):
+                continue
+            tokens_show_time.append((token, float(segment[0])))
+            tokens_estimate_time.append((token, float(
+                float(segment[1]) + ((i + 1) * step)
+            )))
+    return tokens_show_time, tokens_estimate_time
 
 
 def extract_match_tokens_based_on_time(estimat_times, display_times, start, end):
@@ -161,14 +187,14 @@ def extract_match_tokens_based_on_time(estimat_times, display_times, start, end)
     :return out: a dictionary that contains words between start and end
     """
 
-    match_tokens = {}
+    match_tokens = defaultdict(list)
     min_value = 1000000000
     max_value = -1
     # extract tokens between start and end times
     for i in range(len(estimat_times)):
-        for k, v in estimat_times[i].items():
+        for j, (k, v) in enumerate(estimat_times[i]):
             if v <= end and v >= start:
-                match_tokens[k] = display_times[i][k]
+                match_tokens[k].append(display_times[i][j][1])
                 if v < min_value:
                     min_value = v
                 if v > max_value:
@@ -177,18 +203,18 @@ def extract_match_tokens_based_on_time(estimat_times, display_times, start, end)
     leftside_list = []
     rightside_list = []
     for i in range(len(estimat_times)):
-        for k, v in estimat_times[i].items():
+        for j, (k, v) in enumerate(estimat_times[i]):
             if v < min_value:
-                leftside_list.append([v, k, display_times[i][k]])
+                leftside_list.append([v, k, display_times[i][j][1]])
             if v > max_value:
-                rightside_list.append([v, k, display_times[i][k]])
+                rightside_list.append([v, k, display_times[i][j][1]])
 
     if leftside_list != []:
         leftside_list.sort()
-        match_tokens[leftside_list[-1][1]] = leftside_list[-1][2]
+        match_tokens[leftside_list[-1][1]].insert(0, leftside_list[-1][2])
     if rightside_list != []:
         rightside_list.sort()
-        match_tokens[rightside_list[0][1]] = rightside_list[0][2]
+        match_tokens[rightside_list[0][1]].append(rightside_list[0][2])
     return match_tokens
 
 
@@ -204,19 +230,29 @@ def get_delay(timestamp_table, match_tokens):
 
     miss_tokens = 0
     delay = 0
-    for token, time in timestamp_table.items():
-        try:
-            d = float(match_tokens[token]) - time
-            if d > 0:
-                delay += d
-        except:
-            miss_tokens += 1
+    match_tokens = match_tokens.copy()
+    for token, times in timestamp_table.items():
+        for time in times:
+            try:
+                val = match_tokens[token]
+                if type(val) == list:
+                    if len(val) > 0:
+                        val = val[0]
+                        del match_tokens[token][0]
+                    else:
+                        miss_tokens += 1
+                        continue
+                d = float(val) - time
+                if d > 0:
+                    delay += d
+            except:
+                miss_tokens += 1
     return miss_tokens, delay
 
 
 def time_based_evaluation(Ts, candidate_sentences, OStt_sentences):
     """
-    the calculating delay between submission and reference 
+    the calculating delay between submission and reference
 
     :param Ts: a list of timestamps tables
     :param candidate_sentences: a list of candidate_sentences senetnces
@@ -254,26 +290,35 @@ def time_based_evaluation(Ts, candidate_sentences, OStt_sentences):
 def get_wordbased_candidate_table(candidate_sentences):
     """
     In this function, for each slt segment, the candidate time table will be created
-
     :param candidate_sentences: a list of candidate sentences
-    :return flat_candidate_table: a list of dictionary that unique words in the C segments are the keys, and display times are the values
+    :return flat_candidate_table: a list of dictionary that words in the C segments are the keys, and display times are the values
     """
 
     candidate_table = []
     for sentence_segments in candidate_sentences:
-        # bulild candidate time table for each segment 
-        uniq_tokens_start_time = {}
+        # bulild candidate time table for each segment
+        tokens_start_time = []
+        end_seg = sentence_segments[-1][3:-1]
         for segment in sentence_segments:
-            for token in segment[3:-1]:
-                if token not in uniq_tokens_start_time.keys():
-                    uniq_tokens_start_time[token] = float(segment[0])
+            # extract occurrence times based on whether the sequence has
+            # already finalised
+            for i, token in enumerate(segment[3:-1]):
+                if i == len(end_seg):
+                    break
+                elif token != end_seg[i]:
+                    tokens_start_time = tokens_start_time[:i]
+                    break
+                elif i < len(tokens_start_time):
+                    continue
+                tokens_start_time.append((token, float(segment[0])))
+
         # convert candidate timetable to a list according to Complete segments
         token_segment = []
-        for token in sentence_segments[-1][3:-1]:
-            token_segment.append([token, uniq_tokens_start_time[token]])
+        for i, token in enumerate(sentence_segments[-1][3:-1]):
+            token_segment.append([token, tokens_start_time[i][1]])
         candidate_table.append(token_segment)
 
-    # flatten 2D candidate_table 
+    # flatten 2D candidate_table
     flat_candidate_table = []
     for i in candidate_table:
         flat_candidate_table += i
@@ -301,25 +346,25 @@ def time_based_segmenter(segmenter_sentence, flat_candidate_table, MovedWords):
         except:
             right_moved = []
         try:
-            left_moved = flat_candidate_table[(start - MovedWords) : end]
+            left_moved = flat_candidate_table[(start - MovedWords) : start]
         except:
             left_moved = []
         temp = left_moved + temp + right_moved
         start = end
         # convert each segment to a dictionary
-        temp_dict = dict()
+        temp_dict = defaultdict(list)
         for item in temp:
-            temp_dict[item[0]] = item[1]
+            temp_dict[item[0]].append(item[1])
         segment_times.append(temp_dict)
     return segment_times
 
 
 def word_based_evaluation(evaluation_object, temp_folder):
-    flat_candidate_table = get_wordbased_candidate_table(evaluation_object.get('candidate_sentences'))
-
     segmenter_sentence, mWERQuality = delay_segmenter(
         evaluation_object, temp_folder
         )
+    flat_candidate_table = get_wordbased_candidate_table(evaluation_object.get('candidate_sentences'))
+
     segment_times = time_based_segmenter(segmenter_sentence, flat_candidate_table, evaluation_object.get('MovedWords'))
     sum_delay = 0
     sum_missing_words = 0
@@ -332,4 +377,3 @@ def word_based_evaluation(evaluation_object, temp_folder):
         sum_missing_words += temp_list[0][1]
         sum_delay += temp_list[0][0]
     return sum_delay, sum_missing_words, mWERQuality
-
